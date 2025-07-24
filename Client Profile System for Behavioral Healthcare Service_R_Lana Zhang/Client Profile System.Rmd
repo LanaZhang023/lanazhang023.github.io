@@ -1,0 +1,280 @@
+---
+title: "Client Profile System"
+author: "Lana Zhang"
+date: "2025-07-17"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In behavioral healthcare services, effective client engagement is critical to ensuring timely access to care and maximizing treatment outcomes. However, resource limitations often make it challenging to allocate outreach efforts equitably and efficiently. This project aims to develop a data-driven client prioritization framework to assist behavioral health agencies in identifying which clients might need more emotional support, who is more likely to respond quickly, and where to allocate resources efficiently. 
+
+We conducted a series of statistical and machine learning analyses—including logistic regression, random forest, and survival analysis—to uncover key predictors of successful healthcare service enrollment. We further constructed a weighted scoring system based on odds ratios and variable importance, and visualized client profiles via interactive radar maps, allowing agencies and providers to stratify outreach targets and optimize staff allocation, ultimately improving equity and efficiency in the healthcare services delivery.
+
+# Data Source
+
+All client-level data were exported from the agency's internal CRM (Client Relationship Management) system between January 1st and July 15th, 2025, covering active or referred cases during that period. A total of 100 synthetic client profiles were generated for the preliminary development and validation of our risk scoring framework, reflecting typical patterns encountered in public health service delivery.
+
+All 12 dimensions were ordinal-categorical variables and converted into numerical scores using Excel.
+The scale (0, 2, 4) was used for most variables (e.g., Family Complexity, Emotional Intensity), reflecting a non-linear risk progression, where "High" risk disproportionately impacts service success or dropout (Bronheim et al., 2012; Huang et al., 2020). For barrier-type variables such as Contact Frequency and Scheduling Flexibility, inverse scoring (e.g., Rare = –4) was used to reflect the negative predictive weight of poor engagement or rigidity (Kuo et al., 2011).
+
+All analyses were performed in R, with careful attention to imputation of missing values, model validation, and interpretability of results.
+
+# System Set Up
+
+```{r, esults='hide',message=FALSE, warning=FALSE}
+library(tidyverse)
+library(dplyr)
+library(readxl) # read excel
+library(mice) # missing data
+library(knitr) # table
+library(broom) # tidy frames
+library(survival) # survival analysis
+library(randomForest) # random forest analysis
+library(boot) # cv.glm() 
+```
+
+# Data Wrangling
+
+## Input Data
+
+```{r}
+data_client <- read_excel("/Users/zyc/Projects/R/Client Profile Radar Map.xlsx", sheet = "Client Profile Row Data")
+```
+
+## Data Cleaning
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# --- Duplicates ---
+data_client <- head(data_client, -1) # Remove the last Row (NA)
+data_client %>%
+  distinct(Client_Name, .keep_all = TRUE) # Remove duplicates
+data_client <- data_client[, c(1,3,5,7,9,11,13,15,17,19,21,23,25,26)] # Select score columns only
+
+# --- Missing values --- 
+data_client[] <- lapply(data_client, function(x) if (is.character(x)) as.factor(x) else x) 
+# Perform multiple imputation using mice
+imp_result <- mice(data_client, m = 5, method = "pmm", seed = 123) # predictive mean matching for continuous variables 
+# Extract the first imputed dataset
+data_client <- complete(imp_result, 1)
+```
+
+# Model Analysis
+
+## Feature Selection - Logistic Regression Analysis
+
+To identify which behavioral factors are most strongly predict of enrollment success, we fitted a logistic regression model using all available 12 predictors and the estimated the log-odds of enrollment.
+
+To avoid overfitting and reduce multicollinearity, we applied **stepwise feature selection** in both directions using **Akaike Information Criterion (AIC)** as the selection metric. After selection, we computed **odds ratios (ORs)**, representing the multiplicative change in the odds of enrollment associated with a one-unit increase in each predictor, holding others constant.
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+# Logistic Regression Model
+log_model <- glm(Outcome ~ Family_Complexity_Score + Language_Barrier_Score + 
+                   Emotional_Intensity_Score + Prior_Trauma_Score + Interest_Level_Score +
+                   Responsiveness_Score + Scheduling_Flexibility_Score + Contact_Frequency_Score +
+                   Insurance_Status_Score + Transportation_Barrier_Score + Digital_Access_Score +
+                   Referral_Source_Score, data_client, family = binomial)
+
+# Feature Selection
+log_model_step <- step(log_model, direction = "both") # based on AIC
+
+# Extract tidy summary from logistic model
+or_table <- tidy(log_model_step, conf.int = TRUE, exponentiate = TRUE) %>%
+  filter(term != "(Intercept)") %>%  # exclude intercept
+  mutate(across(c(estimate, conf.low, conf.high, p.value), round, 4)) %>%
+  rename(
+    Variable = term,
+    OR = estimate,
+    `95% CI (Lower)` = conf.low,
+    `95% CI (Upper)` = conf.high,
+    `p-value` = p.value
+  )
+```
+
+The final logistic regression model retained **seven key predictors**:
+
+- Language_Barrier_Score  
+- Emotional_Intensity_Score  
+- Interest_Level_Score  
+- Responsiveness_Score  
+- Scheduling_Flexibility_Score  
+- Contact_Frequency_Score  
+- Transportation_Barrier_Score  
+
+All retained predictors demonstrated odds ratios either above or below 1, suggesting meaningful associations with the likelihood of successful enrollment. For example, higher scores in **Responsiveness** and **Transportation Barrier** were associated with significantly increased odds of successful enrollment, after controlling for other variables.
+
+The odds ratio table below presents the odds ratios, coefficients, confidence intervals, and p-values for each retained variable, preparing the foundation for the weighted scoring and outreach prioritization strategy introduced in subsequent sections.
+
+```{r}
+# Display the Odds Ratios result of Regression Analysis in Table
+kable(or_table, caption = "Odds Ratios of Logistic Regression Model")
+```
+
+## Variable Importance Ranking - Random Forest Analysis
+
+We used Random Forest to assess the relative importance of predictors for enrollment outcome. Variable importance was measured by the **mean decrease in Gini impurity**, the plot and table below highlight the top predictors, with higher Gini values indicating greater influence on model decisions, identifying which predictor most strongly drive successful engagement.
+
+```{r}
+# Random Forest Model
+data_client$Outcome <- as.factor(data_client$Outcome) # Convert Outcome to factor
+rf_model <- randomForest(Outcome ~ Family_Complexity_Score + Language_Barrier_Score + 
+                   Emotional_Intensity_Score + Prior_Trauma_Score + Interest_Level_Score +
+                   Responsiveness_Score + Scheduling_Flexibility_Score + Contact_Frequency_Score +
+                   Insurance_Status_Score + Transportation_Barrier_Score + Digital_Access_Score +
+                   Referral_Source_Score, data = data_client, importance = TRUE)
+
+# Print and plot feature importance
+importance(rf_model)
+varImpPlot(rf_model,  # Score weighted based on MeanDecreaseGini
+           main = "Random Forest Feature Importance for Enrollment Prediction") 
+```
+
+Among all variables, the top contributors by both metrics include:
+
+- **Language_Barrier_Score** (Gini: 6.47; Accuracy Drop: 7.56)
+- **Interest_Level_Score** (Gini: 4.36)
+- **Transportation_Barrier_Score** (Gini: 4.57)
+- **Contact_Frequency_Score** (Gini: 4.24)
+
+In contrast, variables such as **Digital_Access_Score** and **Prior_Trauma_Score** exhibited low or even negative importance scores, suggesting minimal or noisy contributions to model performance.
+
+## Weighted Score System - ORs and Ginis Normalization
+
+To build a client prioritization score (`Total_Score`), we constructed a hybrid weighting system based on:
+
+- **Odds Ratios (OR)** from the logistic regression model, representing the strength of association between each predictor and the probability of successful enrollment.
+- **MeanDecreaseGini (Gini Importance)** from the Random Forest model, reflecting the contribution of each variable to prediction accuracy and tree splits.
+
+We applied **min-max normalization** to both metrics, then computed a weighted average using a 60% emphasis on logistic model interpretability and 40% on machine learning robustness. The final scores were normalized to sum to 1.
+
+```{r}
+# Input odds ratios and MeanDecreaseGini results
+or_values <- c(
+  Language_Barrier_Score       = 0.5443913,
+  Emotional_Intensity_Score    = 0.6842281,
+  Interest_Level_Score         = 0.5523583,
+  Responsiveness_Score         = 0.6969597,
+  Scheduling_Flexibility_Score = 0.7253593,
+  Contact_Frequency_Score      = 0.5032169,
+  Transportation_Barrier_Score = 0.7088738
+)
+gini_values <- c(
+  Language_Barrier_Score        = 6.465041,
+  Emotional_Intensity_Score     = 3.858714,
+  Interest_Level_Score          = 4.355271,
+  Responsiveness_Score          = 4.315252,
+  Scheduling_Flexibility_Score  = 3.673420,
+  Contact_Frequency_Score       = 4.244997,
+  Transportation_Barrier_Score  = 4.569516
+)
+
+# Normalize using min-max scaling
+or_score <- (or_values - min(or_values)) / (max(or_values) - min(or_values))
+gini_score <- (gini_values - min(gini_values)) / (max(gini_values) - min(gini_values))
+
+# Combine OR and Gini scores using weighted average
+final_score <- 0.6 * or_score + 0.4 * gini_score
+final_score <- final_score[c(
+  "Language_Barrier_Score", 
+  "Emotional_Intensity_Score", 
+  "Interest_Level_Score",
+  "Responsiveness_Score", 
+  "Scheduling_Flexibility_Score", 
+  "Contact_Frequency_Score",
+  "Transportation_Barrier_Score"
+)]
+
+# Normalize sum to 1
+normalized_weight <- final_score / sum(final_score)
+
+# Calculate the Total_Score
+selected_columns <- intersect(names(normalized_weight), colnames(data_client))
+score_matrix <- as.matrix(data_client[, selected_columns])
+data_client$Total_Score <- as.vector(score_matrix %*% normalized_weight)
+
+# Display Weighted Score System
+weight_table <- data.frame(
+  Weight = round(normalized_weight, 4)
+)
+kable(weight_table, caption = "Final Weights Assigned to Predictors in the Total Score System")
+
+```
+
+# Model Validation
+
+##  10-Fold Cross-validation
+
+To evaluate the generalizability of the logistic regression model using the derived `Total_Score` as the predictor for client enrollment outcome, we applied 10-fold cross-validation using the `cv.glm` function from the `boot` package.
+
+```{r}
+# Cross-validation Model
+model_cv <- glm(Outcome ~ Total_Score, data = data_client, family = binomial)
+cv_result <- cv.glm(data_client, model_cv, K = 10) # 10-Fold
+
+# Summary and display the Cross-validation Results in Table
+cv_summary <- data.frame(
+  Metric = c("Raw Prediction Error", "Bias-Corrected Error"),
+  Value = round(cv_result$delta, 4)
+)
+kable(cv_summary, caption = "10-Fold Cross-Validation of Priority Score")
+```
+
+The cross-validation results yielded a raw prediction error of **`r round(cv_result$delta[1], 4)`** and a bias-corrected error of **`r round(cv_result$delta[2], 4)`**, , indicating strong consistency and low variance across different data folds. This suggests that the model is not overfitting and exhibits stable predictive performance when applied to unseen data.
+
+## A/B Testing with Standard Deviation Banding
+
+To assess whether the priority scores were meaningfully associated with service enrollment, we divided all clients into three groups — **Low**, **Medium**, and **High** — based on tertiles of their `Total_Score`.
+
+```{r}
+# --- Standard Deviation Banding ---
+# Calculate mean and standard deviation score
+score_mean <- mean(data_client$Total_Score, na.rm = TRUE)
+score_sd <- sd(data_client$Total_Score, na.rm = TRUE)
+
+# Categorize clients into 3 priority groups based on Standard Deviation Banding
+data_client$Group <- cut(data_client$Total_Score,
+                         breaks = c(-Inf, score_mean - score_sd,
+                                    score_mean + score_sd, Inf),
+                         labels = c("Low", "Medium", "High"), # Priority
+                         include.lowest = TRUE)
+data_client$Outcome_Labeled <- factor(data_client$Outcome,
+                                      levels = c(0, 1),
+                                      labels = c("Not Enrolled", "Enrolled")) # 0 = Not Enrolled, 1 = Enrolled
+
+# --- A/B Testing ---
+# Create the contingency table for A/B Testing
+table_ab <- table(Group = data_client$Group, Outcome = data_client$Outcome_Labeled)
+
+# Perform chi-squared test to check for association
+ab_test_result <- chisq.test(table_ab) # both variables (Group and Outcome) are categorical
+print(ab_test_result)
+
+# Display the cross-tabulated result in Table
+knitr::kable(as.data.frame.matrix(table_ab), caption = "Enrollment Outcome by Priority Level (SD-based)")
+
+```
+
+The table above shows the distribution of enrollment outcomes across these three groups. The chi-squared test for independence yielded a p-value of **`r signif(ab_test_result$p.value, 4)`**.
+
+`r if (ab_test_result$p.value < 0.05) {
+  "This suggests that the difference in enrollment success across the three priority groups is statistically significant. In other words, the priority score effectively differentiates clients by likelihood of enrollment."
+} else {
+  "This result is not statistically significant, indicating that the differences across priority levels may have occurred by chance."
+}`
+
+# Conclusion
+
+This client profile system demonstrates a data-driven approach to optimizing outreach strategies in behavioral healthcare settings. By integrating statistical modeling (logistic regression), machine learning (random forest), and model validation techniques (cross-validation, A/B Testing), we constructed a weighted prioritization score that reliably differentiates clients based on their predicted likelihood of successful service enrollment.
+
+The system not only highlights which behavioral and logistical dimensions most influence engagement but also enables resource-limited agencies to stratify their outreach efforts with transparency and evidence. Future applications may include real-time client risk monitoring, automated decision dashboards, and continuous model recalibration as new data becomes available.
+
+Ultimately, this client progile system advances both efficiency and equity in healthcare services, ensuring that those with the greatest urgency or likelihood of engagement are reached in a timely and personalized manner.

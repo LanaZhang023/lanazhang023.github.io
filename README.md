@@ -11,3 +11,6 @@ Developed a client profile system covering across 12 key behavioral dimensions t
 
 **DrugExTrack: Gender-Specific Drug Ingredient Exposure Analysis - SQL + R**  
 Analyzed gender differences in drug ingredient exposure using CMS synthetic patient data standardized under OMOP CDM v5.2. Applied advanced SQL window functions to extract per-patient drug usage statistics and conducted hypothesis testing in R via one-tailed t-test to evaluate statistical significance of gender disparities in medication exposure. Confirmed that female patients were significantly more likely to be exposed to multiple drug ingredients than males.
+
+**Clinical Trial Data Validation & Visualization with SAS Macros - SAS**
+Cleaned, validated, and visualized over 10,000 linical trial patient records from EDC system in SAS. Used %tablen macro to generate statistical summary tables across treatment groups and stratified figures via PROC TTEST and PROC SGPLOT. Solved box plot symbol overlap by implementing attribute maps for group-based marker control, significantly enhancing communication of subgroup differences to stakeholders.

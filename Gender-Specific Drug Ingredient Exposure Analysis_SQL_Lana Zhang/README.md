@@ -1,1 +1,1 @@
-
+This project aims to analyze the differences in drug ingredient exposure between male and female patients based on the CMS synthetic patient dataset in the OMOP Common Data Model v5.2. Applied advanced SQL window functions to extract per-patient drug usage statistics and stratified average exposure by gender. Followed with hypothesis testing in R via one-tailed t-test to evaluate statistical significance of gender disparities in medication exposure.
